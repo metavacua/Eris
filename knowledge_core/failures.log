@@ -1,0 +1,31 @@
+# FAILURE LOG
+This file documents critical, unrecoverable errors encountered in the development environment. This log serves as the "knowledge core" for this repository to ensure future development efforts do not repeat past mistakes.
+
+---
+### **Failure #1: `npm` and `vite` Toolchain**
+- **Date:** 2025-10-04
+- **Command Run:** `npm create vite@latest vite-project -- --template react`
+- **Error Message:** `Error: ENOENT: no such file or directory, uv_cwd`
+- **Analysis:** This is a low-level Node.js error where the `npm` process cannot determine its current working directory (`cwd`). This proves that any plan relying on `npm` or `npx` is fundamentally not viable in this environment.
+
+---
+### **Failure #2: `rustup` Installer and Shell Instability**
+- **Date:** 2025-10-04
+- **Command Run:** `/app/rustup-init.sh -y`
+- **Error Message:** `sh: 0: getcwd() failed: No such file or directory`
+- **Analysis:** The `rustup` installer script fails because the underlying shell cannot execute `getcwd()`. This is the same class of error as the `npm` issue but originates from the shell itself, proving that complex toolchain installers that rely on determining their own location within the filesystem are destined to fail.
+
+---
+### **Failure #3: Catastrophic Filesystem Inconsistency**
+- **Date:** 2025-10-04
+- **Command Run:** `cd gemini-processor` (following successful file creation within that directory)
+- **Error Message:** `-bash: cd: gemini-processor: No such file or directory`
+- **Analysis:** The environment's shell is fundamentally inconsistent. It reports success when creating files but then fails to find the directories it just created. This makes it impossible to perform any multi-step operation that relies on a directory structure, such as running a build command. This definitively proves that any plan requiring more than a single file is unworkable.
+
+---
+### **Failure #4: `file://` Protocol and CORS for ES Modules**
+- **Date:** 2025-10-04
+- **Command Run (via Playwright):** `page.goto('file:///app/index.html')` where `index.html` uses `<script type="module">`
+- **Error Message:** `Access to script at 'file:///app/scripts/main.js' from origin 'null' has been blocked by CORS policy.`
+- **Analysis:** Modern browsers, for security reasons, block HTML files opened from the local filesystem (`file://`) from loading JavaScript ES modules. This is a standard security feature, not an environment bug. It means that any multi-file JavaScript solution using modules will fail when opened locally and is therefore not a viable architecture for this project's portability requirements.
+---

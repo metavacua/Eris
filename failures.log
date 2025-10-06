@@ -1,0 +1,38 @@
+# FAILURE LOG
+
+This file documents critical, unrecoverable errors encountered in the development environment.
+
+---
+### **Failure #1: `npm` and `vite` Toolchain**
+
+- **Date:** 2025-10-04
+- **Command Run:** `npm create vite@latest vite-project -- --template react`
+- **Error Message:**
+  ```
+  Error: ENOENT: no such file or directory, uv_cwd
+  ```
+- **Analysis:** This is a low-level Node.js error indicating that the `npm` process cannot determine its current working directory (`cwd`). This confirms that any plan relying on `npm` or `npx` is not viable.
+
+---
+### **Failure #2: `rustup` Installer and Shell Instability**
+
+- **Date:** 2025-10-04
+- **Command Run:** `/app/rustup-init.sh -y`
+- **Error Message:**
+  ```
+  sh: 0: getcwd() failed: No such file or directory
+  error: Unable to proceed. Could not locate working directory.: No such file or directory (os error 2)
+  ```
+- **Analysis:** The `rustup` installer script fails because the underlying shell cannot execute `getcwd()`. This is the same class of error as the `npm` issue but originates from the shell itself, proving that complex toolchain installers are not viable.
+---
+
+### **Failure #3: Catastrophic Filesystem Inconsistency**
+
+- **Date:** 2025-10-04
+- **Command Run:** `cd gemini-processor && ...` (following successful file creation within that directory)
+- **Error Message:**
+  ```
+  -bash: cd: gemini-processor: No such file or directory
+  ```
+- **Analysis:** This is the most severe failure. The environment's shell is fundamentally inconsistent. It reports success when creating files and directories (e.g., `create_file_with_block` creating `gemini-processor/src/lib.rs`), but subsequent commands in the same session fail because the directory allegedly does not exist. This makes it impossible to perform any multi-step operation that relies on a directory structure, such as running a build command. This definitively proves that any plan requiring more than a single file is unworkable and destined to fail.
+---
