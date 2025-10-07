@@ -128,6 +128,68 @@
          body.dark #interaction-detail {
             border-color: var(--border-color-dark);
         }
+        .filter-group {
+            margin-bottom: 1rem;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color-light);
+            border-radius: 6px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+        }
+        body.dark .filter-group {
+            border-color: var(--border-color-dark);
+        }
+        .filter-group label {
+            font-weight: 500;
+        }
+        .filter-group input[type="text"], .filter-group input[type="number"], .filter-group select {
+            padding: 0.5rem;
+            border-radius: 4px;
+            border: 1px solid var(--border-color-light);
+            background-color: var(--card-bg-light);
+            color: var(--text-color-light);
+        }
+         body.dark .filter-group input[type="text"], body.dark .filter-group input[type="number"], body.dark .filter-group select {
+            border-color: var(--border-color-dark);
+            background-color: var(--background-color-dark);
+            color: var(--text-color-dark);
+        }
+        #structure-filter-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.5rem;
+            width: 100%;
+        }
+        #interactions-list {
+            list-style: none;
+            padding: 0.5rem;
+            margin-top: 1rem;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color-light);
+            border-radius: 6px;
+        }
+        body.dark #interactions-list {
+             border-color: var(--border-color-dark);
+        }
+        #interactions-list li {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color-light);
+            cursor: pointer;
+            background-color: var(--card-bg-light);
+        }
+        body.dark #interactions-list li {
+            border-bottom-color: var(--border-color-dark);
+            background-color: var(--card-bg-dark);
+        }
+        #interactions-list li:last-child {
+            border-bottom: none;
+        }
+        #interactions-list li:hover {
+            background-color: rgba(59, 130, 246, 0.1);
+        }
     </style>
 </head>
 <body class="dark">
@@ -143,13 +205,731 @@
             <br><br>
             <input type="file" id="file-upload" accept=".html">
             <br><br>
-            <button id="process-button">Generate & Download .zip</button>
+            <button id="process-button">Process File</button>
             <p id="status-message" style="margin-top: 1rem;"></p>
+        </section>
+
+        <section id="results-section" style="display: none;">
+            <div id="filter-controls">
+                <!-- Filter and sort controls will be rendered here -->
+            </div>
+            <ul id="interactions-list">
+                <!-- Interaction list items will be rendered here -->
+            </ul>
+        </section>
+
+        <section id="interaction-detail-section" style="display: none;">
+            <!-- The detailed view of a single interaction will be rendered here -->
         </section>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script type="module" src="/scripts/main.js"></script>
+    <script type="module">
+      // --- APPLICATION ARCHITECTURE ---
+
+      const State = {
+        // All dynamic application state will be stored here.
+        // This acts as the single source of truth.
+        interactions: [],
+        selectedInteraction: null,
+        isLoading: false,
+        error: '',
+        theme: 'dark',
+        // Filter and sort state
+        searchTerm: '',
+        sortOption: 'timestamp_desc',
+        availableStructures: [],
+        selectedStructureFilters: [],
+        clientFilterStatus: 'all',
+        // Advanced analysis state
+        isVowelRemovalApplied: false,
+        areSemanticEncodingsGenerated: false,
+        encodingStatusMessage: '',
+        wordFrequenciesGlobal: null,
+        isAntiZipfianFilterActive: false,
+        antiZipfianThresholdInput: "1",
+        antiZipfianStatusMessage: '',
+        matchingInteractionIdsForAntiZipfian: new Set(),
+        isProcessingHeavyTask: false,
+      };
+
+      const Utils = {
+        SHORT_PROMPT_THRESHOLD: 20,
+        STRUCTURE_VOCABULARY: [
+            'latex_documentclass', 'latex_document_env', 'latex_usepackage',
+            'xml_declaration', 'doctype_declaration', 'html_tag', 'html_body_tag', 'svg_tag', 'xml_html_block_general',
+            'python_def', 'python_class', 'python_import',
+            'javascript_function', 'javascript_class', 'javascript_variable_declaration', 'javascript_console_log',
+            'lisp_keyword_form',
+            'markdown_code_block_other', 'markdown_table',
+            'css_rules'
+        ],
+
+        estimateTokens(text) {
+            if (!text || typeof text !== 'string') return 0;
+            return Math.ceil(text.length / 4);
+        },
+
+        removeVowels(text) {
+            if (!text || typeof text !== 'string') return "";
+            return text.replace(/[aeiouAEIOU]/g, '');
+        },
+
+        detectStructures(prompt, response) {
+            const structures = new Set();
+            const combinedText = `${prompt}\n${response}`;
+
+            if (/\\documentclass\[?[^\]]*\]?\{[^}]*\}/.test(combinedText)) structures.add('latex_documentclass');
+            if (/\\begin\{document\}/.test(combinedText)) structures.add('latex_document_env');
+            if (/\\usepackage\{[^}]*\}/.test(combinedText)) structures.add('latex_usepackage');
+            if (/<\?xml[^>]*\?>/.test(combinedText)) structures.add('xml_declaration');
+            if (/<!DOCTYPE[^>]*>/i.test(combinedText)) structures.add('doctype_declaration');
+            if (/<html[^>]*>/i.test(combinedText)) structures.add('html_tag');
+            if (/<body[^>]*>/i.test(combinedText)) structures.add('html_body_tag');
+            if (/<svg[^>]*>/i.test(combinedText)) structures.add('svg_tag');
+            if (/<([a-zA-Z][\w:-]*)(?:\s+[a-zA-Z][\w:-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^>\s]+))*\s*\/?>[\s\S]*?<\/\1\s*>/m.test(combinedText)) {
+                 structures.add('xml_html_block_general');
+            }
+            if (/\bdef\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(combinedText)) structures.add('python_def');
+            if (/\bclass\s+[A-Z_][a-zA-Z0-9_]*\s*[:\(]/.test(combinedText)) structures.add('python_class');
+            if (/^\s*(?:from\s+[\w.]+\s+)?import\s+(?:[\w.*]+(?:,\s*[\w.*]+)*)/m.test(combinedText)) structures.add('python_import');
+            if (/\bfunction(?:\s+[\w$]*)?\s*\(/.test(combinedText)) structures.add('javascript_function');
+            if (/\bclass\s+[A-Z_$][\w$]*(\s+extends\s+[A-Z_$][\w$]*)?\s*\{/.test(combinedText)) structures.add('javascript_class');
+            if (/\b(const|let|var)\s+[\w$]+\s*=?/.test(combinedText)) structures.add('javascript_variable_declaration');
+            if (/\bconsole\.log\s*\(/.test(combinedText)) structures.add('javascript_console_log');
+            if (/\((?:defun|define|lambda|let\*?|if|cond|setq)\s+[^)]*\)/i.test(combinedText)) structures.add('lisp_keyword_form');
+            if (/```(?:[a-zA-Z0-9\-_]+)?\n[\s\S]*?\n```/g.test(combinedText)) {
+                structures.add('markdown_code_block_other');
+            }
+            if (/^\s*\|.*?\n^\s*\|\s*---+\s*\|/m.test(combinedText)) structures.add('markdown_table');
+            if (/(?:[.#]?[a-zA-Z][\w-]*|@md[^\{]+)\s*\{[\s\S]*?\}/.test(combinedText)) structures.add('css_rules');
+
+            return Array.from(structures);
+        },
+
+        getLengthCategory(text) {
+            const length = text ? text.length : 0;
+            if (length < 50) return 'S';
+            if (length <= 250) return 'M';
+            return 'L';
+        },
+
+        tokenizeTextForFrequency(text) {
+            if (!text || typeof text !== 'string') return [];
+            return text.toLowerCase().match(/\b\w{3,}\b/g) || [];
+        },
+
+        async calculateWordFrequenciesAsync(interactions, textAccessor) {
+            return new Promise((resolve) => {
+                setTimeout(() => {
+                    const frequencies = new Map();
+                    interactions.forEach(interaction => {
+                        const textToAnalyze = textAccessor(interaction);
+                        const tokens = this.tokenizeTextForFrequency(textToAnalyze);
+                        tokens.forEach(token => {
+                            frequencies.set(token, (frequencies.get(token) || 0) + 1);
+                        });
+                    });
+                    resolve(frequencies);
+                }, 0);
+            });
+        },
+
+        downloadReport(content, filename, mimeType = 'application/zip') {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        },
+      };
+
+      const Parser = {
+        parseGeminiActivityHTML(htmlString) {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlString, 'text/html');
+            const interactions = [];
+            const interactionElements = doc.querySelectorAll('div.outer-cell.mdl-cell.mdl-cell--12-col.mdl-shadow--2dp');
+
+            if (!interactionElements || interactionElements.length === 0) {
+                console.error("Could not find interaction elements. Please inspect your HTML structure.");
+                return [];
+            }
+
+            interactionElements.forEach((elementContainer, i) => {
+                let queryOriginal = "";
+                let responseOriginal = "";
+                let timestampStr = "";
+                let originalPromptTextForFeedbackCheck = "";
+
+                const mainContentCell = elementContainer.querySelector('div.content-cell.mdl-cell.mdl-cell--6-col.mdl-typography--body-1');
+
+                if (mainContentCell) {
+                    const currentPromptParts = [];
+                    let responseStartNode = null;
+                    for (let nodeIdx = 0; nodeIdx < mainContentCell.childNodes.length; nodeIdx++) {
+                        const currentNode = mainContentCell.childNodes[nodeIdx];
+                        if (currentNode.nodeName.toLowerCase() === 'br') {
+                            const nextSibling = currentNode.nextSibling;
+                            if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
+                                const potentialTimestamp = nextSibling.textContent.trim();
+                                if (potentialTimestamp.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b \d{1,2}, \d{4}, \d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)(?:\s+[A-Z]{3})?/)) {
+                                    timestampStr = potentialTimestamp;
+                                    responseStartNode = nextSibling.nextSibling;
+                                    break;
+                                }
+                            }
+                            currentPromptParts.push("\n");
+                        } else if (currentNode.nodeType === Node.TEXT_NODE) {
+                            currentPromptParts.push(currentNode.textContent);
+                        } else if (currentNode.nodeType === Node.ELEMENT_NODE && !['script', 'style'].includes(currentNode.nodeName.toLowerCase())) {
+                            currentPromptParts.push(currentNode.textContent || "");
+                        }
+                    }
+
+                    let tempPromptText = currentPromptParts.join("").trim();
+                    originalPromptTextForFeedbackCheck = tempPromptText;
+
+                    if (tempPromptText.startsWith("Prompted ")) {
+                        queryOriginal = tempPromptText.substring("Prompted ".length).trim();
+                    } else {
+                        queryOriginal = tempPromptText;
+                    }
+
+                    if (responseStartNode) {
+                        const responsePartsCollected = [];
+                        let currentResponseSibling = responseStartNode;
+                        while (currentResponseSibling) {
+                            if (currentResponseSibling.nodeType === Node.ELEMENT_NODE) {
+                                const nodeNameLower = currentResponseSibling.nodeName.toLowerCase();
+                                if (['p', 'div', 'ul', 'ol', 'pre', 'table'].includes(nodeNameLower)) {
+                                    const nodeText = currentResponseSibling.textContent || "";
+                                    if (!nodeText.toLowerCase().includes("explore related topics") && !currentResponseSibling.querySelector('button')) {
+                                        responsePartsCollected.push(nodeText.trim());
+                                    }
+                                }
+                            } else if (currentResponseSibling.nodeType === Node.TEXT_NODE && currentResponseSibling.textContent.trim()) {
+                                responsePartsCollected.push(currentResponseSibling.textContent.trim());
+                            }
+                            currentResponseSibling = currentResponseSibling.nextSibling;
+                        }
+                        if (responsePartsCollected.length > 0) responseOriginal = responsePartsCollected.filter(Boolean).join("\n\n").trim();
+                    }
+
+                    if (!timestampStr) {
+                        const captionCell = elementContainer.querySelector('div.content-cell.mdl-cell.mdl-cell--12-col.mdl-typography--caption');
+                        if (captionCell) {
+                            const captionTextNodes = Array.from(captionCell.childNodes).filter(node => node.nodeType === Node.TEXT_NODE);
+                            for (const textNode of captionTextNodes) {
+                                const potentialTs = textNode.textContent.trim();
+                                if (potentialTs.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b \d{1,2}, \d{4}, \d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)(?:\s+[A-Z]{3})?/)) {
+                                    timestampStr = potentialTs;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const promptTokens = Utils.estimateTokens(queryOriginal);
+                const responseTokens = Utils.estimateTokens(responseOriginal);
+                const detectedStructuresArray = Utils.detectStructures(queryOriginal, responseOriginal);
+
+                let responseToPromptTokenRatio = null;
+                if (promptTokens > 0) {
+                    responseToPromptTokenRatio = parseFloat((responseTokens / promptTokens).toFixed(2));
+                } else if (responseTokens > 0 && promptTokens === 0) {
+                    responseToPromptTokenRatio = Infinity;
+                } else {
+                    responseToPromptTokenRatio = 0;
+                }
+
+                let clientSideFilter = {
+                    passed: false,
+                    reason: "no_qualifying_condition_met",
+                    detectedStructures: detectedStructuresArray
+                };
+
+                if (originalPromptTextForFeedbackCheck.startsWith("Gave feedback:")) {
+                    clientSideFilter.passed = false;
+                    clientSideFilter.reason = "feedback_entry";
+                } else if (detectedStructuresArray.length > 0) {
+                    clientSideFilter.passed = true;
+                    clientSideFilter.reason = null;
+                } else {
+                    clientSideFilter.passed = false;
+                    clientSideFilter.reason = "no_specific_structure_detected";
+                    if (!queryOriginal || queryOriginal.length < Utils.SHORT_PROMPT_THRESHOLD) {
+                         clientSideFilter.reason = "no_structure_and_short_prompt";
+                    } else if (!responseOriginal) {
+                         clientSideFilter.reason = "no_structure_and_empty_response";
+                    }
+                }
+
+                if (queryOriginal || responseOriginal || (timestampStr && !queryOriginal && !responseOriginal) || clientSideFilter.reason === "feedback_entry") {
+                    interactions.push({
+                        id: `interaction-${i}`,
+                        query: queryOriginal,
+                        response: responseOriginal,
+                        queryOriginal: queryOriginal,
+                        responseOriginal: responseOriginal,
+                        textTransformationApplied: null,
+                        timestamp: timestampStr || "Unknown Time",
+                        originalIndex: i,
+                        estimatedTokens: {
+                            prompt: promptTokens,
+                            response: responseTokens,
+                            total: promptTokens + responseTokens
+                        },
+                        responseToPromptTokenRatio: responseToPromptTokenRatio,
+                        clientSideFilter: clientSideFilter,
+                        rhythmSignature: null,
+                        structuralVector: null
+                    });
+                }
+            });
+            return interactions;
+        },
+      };
+
+      const Logic = {
+        reProcessInteractionForFiltersAndEncodings(interaction, transformationApplied) {
+            const currentQuery = interaction.query;
+            const currentResponse = interaction.response;
+
+            const promptTokens = Utils.estimateTokens(currentQuery);
+            const responseTokens = Utils.estimateTokens(currentResponse);
+            const detectedStructuresArray = Utils.detectStructures(currentQuery, currentResponse);
+
+            let responseToPromptTokenRatio = null;
+            if (promptTokens > 0) {
+                responseToPromptTokenRatio = parseFloat((responseTokens / promptTokens).toFixed(2));
+            } else if (responseTokens > 0 && promptTokens === 0) {
+                responseToPromptTokenRatio = Infinity;
+            } else {
+                responseToPromptTokenRatio = 0;
+            }
+
+            let clientSideFilter = {
+                passed: false,
+                reason: "no_qualifying_condition_met",
+                detectedStructures: detectedStructuresArray
+            };
+
+            if (interaction.clientSideFilter.reason === "feedback_entry") {
+                 clientSideFilter.passed = false;
+                 clientSideFilter.reason = "feedback_entry";
+            } else if (detectedStructuresArray.length > 0) {
+                clientSideFilter.passed = true;
+                clientSideFilter.reason = null;
+            } else {
+                clientSideFilter.passed = false;
+                clientSideFilter.reason = "no_specific_structure_detected";
+                if (!currentQuery || currentQuery.length < Utils.SHORT_PROMPT_THRESHOLD) {
+                     clientSideFilter.reason = "no_structure_and_short_prompt";
+                } else if (!currentResponse) {
+                     clientSideFilter.reason = "no_structure_and_empty_response";
+                }
+            }
+
+            return {
+                ...interaction,
+                textTransformationApplied: transformationApplied,
+                estimatedTokens: { prompt: promptTokens, response: responseTokens, total: promptTokens + responseTokens },
+                responseToPromptTokenRatio: responseToPromptTokenRatio,
+                clientSideFilter: clientSideFilter,
+                rhythmSignature: null,
+                structuralVector: null
+            };
+        },
+
+        async applyVowelRemoval() {
+            if (State.isVowelRemovalApplied) return;
+
+            State.isProcessingHeavyTask = true;
+            UI.render();
+
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            const transformed = State.interactions.map(interaction => {
+                const queryProcessed = Utils.removeVowels(interaction.queryOriginal);
+                const responseProcessed = Utils.removeVowels(interaction.responseOriginal);
+                const tempInteraction = { ...interaction, query: queryProcessed, response: responseProcessed };
+                return this.reProcessInteractionForFiltersAndEncodings(tempInteraction, "vowel_removal");
+            });
+
+            State.interactions = transformed;
+            State.wordFrequenciesGlobal = await Utils.calculateWordFrequenciesAsync(transformed, int => `${int.query} ${int.response}`);
+            State.isVowelRemovalApplied = true;
+            State.areSemanticEncodingsGenerated = false;
+            State.isAntiZipfianFilterActive = false;
+            State.isProcessingHeavyTask = false;
+            UI.render();
+        },
+
+        generateSemanticEncodings() {
+            if (State.areSemanticEncodingsGenerated) return;
+
+            const encodedInteractions = State.interactions.map(interaction => {
+                const promptLenCat = Utils.getLengthCategory(interaction.query);
+                const responseLenCat = Utils.getLengthCategory(interaction.response);
+                const structureTags = interaction.clientSideFilter.detectedStructures.length > 0
+                    ? interaction.clientSideFilter.detectedStructures.join(',')
+                    : 'NONE';
+                const rhythmSignature = `P[${promptLenCat},${structureTags.substring(0, 15)}]_R[${responseLenCat}]`;
+
+                const structuralVector = Utils.STRUCTURE_VOCABULARY.map(vocabItem =>
+                    interaction.clientSideFilter.detectedStructures.includes(vocabItem) ? 1 : 0
+                );
+
+                return { ...interaction, rhythmSignature, structuralVector };
+            });
+            State.interactions = encodedInteractions;
+            State.areSemanticEncodingsGenerated = true;
+            UI.render();
+        },
+
+        async applyAntiZipfianFilter() {
+            const threshold = parseInt(State.antiZipfianThresholdInput, 10);
+            if (isNaN(threshold) || threshold < 1) {
+                State.antiZipfianStatusMessage = "Invalid threshold.";
+                UI.render();
+                return;
+            }
+
+            State.isProcessingHeavyTask = true;
+            UI.render();
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            const rareWords = [];
+            State.wordFrequenciesGlobal.forEach((count, word) => {
+                if (count <= threshold) rareWords.push(word);
+            });
+
+            const matchingIds = new Set();
+            if (rareWords.length > 0) {
+                for (const int of State.interactions) {
+                    const interactionText = `${int.query} ${int.response}`.toLowerCase();
+                    const interactionTokens = new Set(Utils.tokenizeTextForFrequency(interactionText));
+                    if (rareWords.some(rareWord => interactionTokenSet.has(rareWord))) {
+                        matchingIds.add(int.id);
+                    }
+                }
+            }
+
+            State.matchingInteractionIdsForAntiZipfian = matchingIds;
+            State.isAntiZipfianFilterActive = true;
+            State.isProcessingHeavyTask = false;
+            UI.render();
+        },
+
+        getDisplayedInteractions() {
+            let filtered = [...State.interactions];
+
+            // 1. Filter by Client-Side Filter Status
+            if (State.clientFilterStatus !== 'all') {
+                filtered = filtered.filter(int =>
+                    State.clientFilterStatus === 'passed' ? int.clientSideFilter.passed : !int.clientSideFilter.passed
+                );
+            }
+
+            // 2. Filter by Detected Structures (AND logic)
+            if (State.selectedStructureFilters.length > 0) {
+                filtered = filtered.filter(int =>
+                    State.selectedStructureFilters.every(struct => int.clientSideFilter.detectedStructures.includes(struct))
+                );
+            }
+
+            // 3. Filter by Anti-Zipfian (Rare Words)
+            if (State.isAntiZipfianFilterActive) {
+                filtered = filtered.filter(int => State.matchingInteractionIdsForAntiZipfian.has(int.id));
+            }
+
+            // 4. Filter by Search Term
+            if (State.searchTerm) {
+                const lowerSearchTerm = State.searchTerm.toLowerCase();
+                filtered = filtered.filter(int =>
+                    (int.query && int.query.toLowerCase().includes(lowerSearchTerm)) ||
+                    (int.response && int.response.toLowerCase().includes(lowerSearchTerm))
+                );
+            }
+
+            // 5. Sort
+            const parseTimestamp = (ts) => {
+                try { return new Date(ts); } catch (e) { return new Date(0); }
+            };
+
+            switch (State.sortOption) {
+                case 'timestamp_asc':
+                    filtered.sort((a, b) => parseTimestamp(a.timestamp) - parseTimestamp(b.timestamp));
+                    break;
+                case 'timestamp_desc':
+                default:
+                    filtered.sort((a, b) => parseTimestamp(b.timestamp) - parseTimestamp(a.timestamp));
+                    break;
+            }
+            return filtered;
+        }
+      };
+
+      const UI = {
+        // This function will be the central point for all DOM updates.
+        render() {
+          const { isLoading, error, interactions, selectedInteraction } = State;
+          const statusMessageEl = document.getElementById('status-message');
+          const resultsSectionEl = document.getElementById('results-section');
+          const detailSectionEl = document.getElementById('interaction-detail-section');
+          const uploadSectionEl = document.getElementById('file-upload-section');
+
+          // Handle status message
+          statusMessageEl.textContent = isLoading ? 'Processing...' : (error || '');
+
+          if (selectedInteraction) {
+            // Show only the detail view
+            uploadSectionEl.style.display = 'none';
+            resultsSectionEl.style.display = 'none';
+            detailSectionEl.style.display = 'block';
+            this.renderDetailView(selectedInteraction);
+          } else if (interactions.length > 0) {
+            // Show the results list and hide the upload section
+            uploadSectionEl.style.display = 'none';
+            resultsSectionEl.style.display = 'block';
+            detailSectionEl.style.display = 'none';
+            this.renderFilterControls();
+            const displayedInteractions = Logic.getDisplayedInteractions();
+            this.renderInteractionList(displayedInteractions);
+          } else {
+            // Initial state
+            uploadSectionEl.style.display = 'block';
+            resultsSectionEl.style.display = 'none';
+            detailSectionEl.style.display = 'none';
+          }
+        },
+
+        renderInteractionList(interactionsToRender) {
+            const listEl = document.getElementById('interactions-list');
+            listEl.innerHTML = ''; // Clear previous list
+
+            if (interactionsToRender.length === 0) {
+                listEl.innerHTML = '<li>No interactions match the current filters.</li>';
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+            interactionsToRender.forEach(interaction => {
+                const li = document.createElement('li');
+                li.dataset.interactionId = interaction.id;
+                li.innerHTML = `
+                    <p class="timestamp">${interaction.timestamp} (~${interaction.estimatedTokens.total} tokens)</p>
+                    <p class="query-preview">${interaction.query ? interaction.query.substring(0, 120) + '...' : '<em>No prompt</em>'}</p>
+                `;
+                li.addEventListener('click', () => {
+                    State.selectedInteraction = interaction;
+                    this.render();
+                });
+                fragment.appendChild(li);
+            });
+            listEl.appendChild(fragment);
+        },
+
+        renderDetailView(interaction) {
+            const detailEl = document.getElementById('interaction-detail-section');
+            const structures = interaction.clientSideFilter.detectedStructures.join(', ') || 'None';
+            detailEl.innerHTML = `
+                <button id="back-button">&larr; Back to List</button>
+                <h2>Interaction Detail</h2>
+                <div class="detail-item"><strong>Timestamp:</strong> ${interaction.timestamp}</div>
+                <div class="detail-item"><strong>Detected Structures:</strong> ${structures}</div>
+                <div class="detail-item"><strong>Total Tokens:</strong> ${interaction.estimatedTokens.total}</div>
+                <hr>
+                <h3>Prompt</h3>
+                <pre>${interaction.query || '(No prompt)'}</pre>
+                <h3>Response</h3>
+                <div>${interaction.responseOriginal.replace(/\n/g, '<br/>') || '(No response)'}</div>
+            `;
+
+            document.getElementById('back-button').addEventListener('click', () => {
+                State.selectedInteraction = null;
+                this.render();
+            });
+        },
+
+        renderFilterControls() {
+            const filterEl = document.getElementById('filter-controls');
+            const { searchTerm, sortOption, clientFilterStatus, availableStructures, selectedStructureFilters, isVowelRemovalApplied, areSemanticEncodingsGenerated, isProcessingHeavyTask, antiZipfianThresholdInput, isAntiZipfianFilterActive, antiZipfianStatusMessage } = State;
+
+            const structureCheckboxes = availableStructures.map(struct => `
+                <label>
+                    <input type="checkbox" class="structure-filter-cb" value="${struct}" ${selectedStructureFilters.includes(struct) ? 'checked' : ''}>
+                    ${struct.replace(/_/g, ' ')}
+                </label>
+            `).join('');
+
+            filterEl.innerHTML = `
+                <div class="filter-group">
+                    <input type="text" id="search-input" placeholder="Search..." value="${searchTerm}" ${isProcessingHeavyTask ? 'disabled' : ''}>
+                    <select id="sort-select" ${isProcessingHeavyTask ? 'disabled' : ''}>
+                        <option value="timestamp_desc" ${sortOption === 'timestamp_desc' ? 'selected' : ''}>Newest First</option>
+                        <option value="timestamp_asc" ${sortOption === 'timestamp_asc' ? 'selected' : ''}>Oldest First</option>
+                    </select>
+                    <select id="client-filter-select" ${isProcessingHeavyTask ? 'disabled' : ''}>
+                        <option value="all" ${clientFilterStatus === 'all' ? 'selected' : ''}>All Client Filter</option>
+                        <option value="passed" ${clientFilterStatus === 'passed' ? 'selected' : ''}>Passed Only</option>
+                        <option value="failed" ${clientFilterStatus === 'failed' ? 'selected' : ''}>Failed Only</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Filter by Detected Structures:</label>
+                    <div id="structure-filter-container">${structureCheckboxes}</div>
+                </div>
+                <div class="filter-group">
+                    <button id="vowel-removal-btn" ${isVowelRemovalApplied || isProcessingHeavyTask ? 'disabled' : ''}>
+                        ${isVowelRemovalApplied ? 'Vowels Removed' : 'Apply Vowel Removal'}
+                    </button>
+                    <button id="semantic-encoding-btn" ${areSemanticEncodingsGenerated || isProcessingHeavyTask ? 'disabled' : ''}>
+                        ${areSemanticEncodingsGenerated ? 'Encodings Generated' : 'Generate Encodings'}
+                    </button>
+                    <button id="download-zip-btn" ${isProcessingHeavyTask ? 'disabled' : ''}>Download Filtered as .zip</button>
+                </div>
+                <div class="filter-group">
+                    <label for="anti-zipfian-input">Anti-Zipfian (words <= N):</label>
+                    <input type="number" id="anti-zipfian-input" value="${antiZipfianThresholdInput}" min="1" ${isProcessingHeavyTask ? 'disabled' : ''}>
+                    <button id="anti-zipfian-apply-btn" ${isProcessingHeavyTask || !State.wordFrequenciesGlobal ? 'disabled' : ''}>Apply</button>
+                    ${isAntiZipfianFilterActive ? '<button id="anti-zipfian-clear-btn">Clear</button>' : ''}
+                    <p id="anti-zipfian-status">${antiZipfianStatusMessage}</p>
+                </div>
+            `;
+
+            // Re-attach event listeners
+            document.getElementById('search-input').addEventListener('input', (e) => { State.searchTerm = e.target.value; this.render(); });
+            document.getElementById('sort-select').addEventListener('change', (e) => { State.sortOption = e.target.value; this.render(); });
+            document.getElementById('client-filter-select').addEventListener('change', (e) => { State.clientFilterStatus = e.target.value; this.render(); });
+            document.querySelectorAll('.structure-filter-cb').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    const { value, checked } = e.target;
+                    if (checked) {
+                        State.selectedStructureFilters.push(value);
+                    } else {
+                        State.selectedStructureFilters = State.selectedStructureFilters.filter(s => s !== value);
+                    }
+                    this.render();
+                });
+            });
+            document.getElementById('vowel-removal-btn').addEventListener('click', () => Logic.applyVowelRemoval());
+            document.getElementById('semantic-encoding-btn').addEventListener('click', () => Logic.generateSemanticEncodings());
+            document.getElementById('download-zip-btn').addEventListener('click', () => this.handleZipDownload());
+            document.getElementById('anti-zipfian-input').addEventListener('input', (e) => { State.antiZipfianThresholdInput = e.target.value; });
+            document.getElementById('anti-zipfian-apply-btn').addEventListener('click', () => Logic.applyAntiZipfianFilter());
+            if (isAntiZipfianFilterActive) {
+                document.getElementById('anti-zipfian-clear-btn').addEventListener('click', () => {
+                    State.isAntiZipfianFilterActive = false;
+                    State.antiZipfianStatusMessage = 'Filter cleared.';
+                    this.render();
+                });
+            }
+        },
+
+        // This function sets up the initial event listeners.
+        initialize() {
+          document.getElementById('process-button').addEventListener('click', () => this.handleFileProcessing());
+          document.getElementById('theme-toggle').addEventListener('click', () => {
+              document.body.classList.toggle('dark');
+              document.body.classList.toggle('light');
+              State.theme = document.body.classList.contains('dark') ? 'dark' : 'light';
+          });
+          document.body.classList.add(State.theme);
+          if(State.theme === 'light') document.body.classList.remove('dark');
+        },
+
+        async handleZipDownload() {
+            const interactionsToZip = Logic.getDisplayedInteractions();
+            if (interactionsToZip.length === 0) {
+                alert("No interactions to download.");
+                return;
+            }
+
+            const zip = new JSZip();
+            interactionsToZip.forEach(interaction => {
+                const filename = `interaction_${interaction.originalIndex}.txt`;
+                const content = `Timestamp: ${interaction.timestamp}\n\n--- PROMPT ---\n${interaction.query}\n\n--- RESPONSE ---\n${interaction.response}`;
+                zip.file(filename, content);
+            });
+
+            const zipContent = await zip.generateAsync({ type: "blob" });
+            Utils.downloadReport(zipContent, "gemini_interactions.zip", "application/zip");
+        },
+
+        async handleFileProcessing() {
+            const fileInput = document.getElementById('file-upload');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                State.error = 'Please select a file first.';
+                this.render();
+                return;
+            }
+
+            State.isLoading = true;
+            State.error = '';
+            State.interactions = [];
+            this.render();
+
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            const reader = new FileReader();
+
+            reader.onload = async (e) => {
+                try {
+                    const content = e.target.result;
+                    const parsedInteractions = Parser.parseGeminiActivityHTML(content);
+                    State.interactions = parsedInteractions;
+
+                    const allDetected = new Set();
+                    parsedInteractions.forEach(interaction => {
+                        interaction.clientSideFilter.detectedStructures.forEach(s => allDetected.add(s));
+                    });
+                    State.availableStructures = Array.from(allDetected).sort();
+
+                    // Correctly calculate initial word frequencies
+                    State.wordFrequenciesGlobal = await Utils.calculateWordFrequenciesAsync(parsedInteractions, int => `${int.queryOriginal} ${int.responseOriginal}`);
+
+                    if (parsedInteractions.length === 0) {
+                      State.error = 'File processed, but no interactions were found.';
+                    }
+                } catch (parseError) {
+                    console.error("Error parsing HTML:", parseError);
+                    State.error = `Error parsing HTML: ${parseError.message}`;
+                    State.interactions = [];
+                } finally {
+                    State.isLoading = false;
+                    this.render();
+                }
+            };
+
+            reader.onerror = () => {
+                State.isLoading = false;
+                State.error = 'Failed to read the file.';
+                State.interactions = [];
+                this.render();
+            };
+
+            reader.readAsText(file);
+        }
+      };
+
+      // --- MAIN ---
+
+      function main() {
+        console.log("Application Initialized");
+        UI.initialize();
+      }
+
+      main();
+    </script>
 
 </body>
 </html>
